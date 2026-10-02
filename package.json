@@ -1,0 +1,17 @@
+{
+  "name": "algae-lineage",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "藻类细胞分裂谱系复原（浏览器内联合选择斑点与连接）",
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "node --test test/*.test.js",
+    "build": "node scripts/build.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "verify": "npm run test && npm run build && npm run smoke"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

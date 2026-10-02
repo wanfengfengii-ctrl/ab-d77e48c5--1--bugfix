@@ -1,0 +1,35 @@
+services:
+  web:
+    build: .
+    image: algae-lineage:latest
+    container_name: algae-lineage-web
+    # 宿主机访问端口由 WEB_PORT 配置（默认 8080），容器内固定监听 8080
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  # 一次性校验服务：待 web 健康检查通过后，自行执行单元测试、构建与
+  # 含分裂与漏检的谱系烟测，以退出码报告结果（退出 0 即全部通过）。
+  verify:
+    image: algae-lineage:latest
+    build: .
+    container_name: algae-lineage-verify
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      - PORT=8099
+      - HOST=127.0.0.1
+      # 编排中的 web 服务（depends_on 已确保其健康检查通过）
+      - WEB_URL=http://web:8080
+    entrypoint: ["npm", "run", "verify"]
+    restart: "no"

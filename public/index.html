@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>藻类细胞分裂谱系复原</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>藻类细胞分裂谱系复原</h1>
+    <p class="subtitle">在浏览器内联合选择斑点与连接：保持 / 分裂为二 / 跨一帧漏检；按总亮度 → 漏检数 → 输入顺序裁决</p>
+  </header>
+
+  <main>
+    <section class="panel" id="editor-panel">
+      <div class="panel-head">
+        <h2>1. 录入帧与参数（草稿）</h2>
+        <div class="head-actions">
+          <button type="button" id="btn-demo" class="btn btn-ghost">载入示例</button>
+          <button type="button" id="btn-clear" class="btn btn-ghost">清空结果</button>
+        </div>
+      </div>
+
+      <div class="params">
+        <label>帧数
+          <select id="frame-count"></select>
+        </label>
+        <label>起始斑点（第 1 帧）
+          <select id="start-id"></select>
+        </label>
+        <label>相邻帧最大位移
+          <input type="number" id="max-move" min="0" step="any" value="5">
+        </label>
+        <label>允许漏检帧数
+          <input type="number" id="max-skip" min="0" step="1" value="1">
+        </label>
+        <label>终帧存活细胞数
+          <input type="number" id="survivors" min="1" step="1" value="1">
+        </label>
+      </div>
+
+      <div id="frames-editor" class="frames-editor"></div>
+
+      <div class="run-row">
+        <button type="button" id="btn-solve" class="btn btn-primary">复原谱系</button>
+        <span id="dirty-hint" class="hint" hidden>草稿已修改，旧谱系已作废，请重新复原。</span>
+      </div>
+      <div id="input-errors" class="errors" hidden></div>
+    </section>
+
+    <section class="panel" id="result-panel">
+      <div class="panel-head"><h2>2. 复原结果</h2></div>
+
+      <div id="empty-view" class="empty">
+        录入 4–7 个帧（每帧 2–8 个唯一斑点及整数坐标、亮度）并填写参数后，点击「复原谱系」。
+      </div>
+
+      <div id="result-view" hidden>
+        <div id="broke-view" class="broke" hidden></div>
+
+        <div id="summary" class="summary" hidden></div>
+
+        <div class="viz-wrap">
+          <svg id="lineage-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+        <div class="legend">
+          <span><i class="dot dot-adopted"></i>采用斑点</span>
+          <span><i class="dot dot-start"></i>起始斑点</span>
+          <span><i class="dot dot-unused"></i>未采用</span>
+          <span><i class="line line-direct"></i>母女直连</span>
+          <span><i class="line line-skip"></i>漏检跨帧（虚点为漏检位置）</span>
+        </div>
+
+        <h3>采用斑点</h3>
+        <div id="adopted-tables" class="adopted-tables"></div>
+
+        <h3>逐段位移</h3>
+        <div class="table-wrap">
+          <table id="segments-table">
+            <thead>
+              <tr>
+                <th>类型</th><th>母（帧·斑点）</th><th>段</th>
+                <th>至</th><th>段位移</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">全部计算在本机浏览器内完成，不上传任何数据。</footer>
+
+  <noscript>
+    <div style="padding:24px;text-align:center;color:#a5482f">
+      本应用需要启用 JavaScript 才能在浏览器内复原谱系。
+    </div>
+  </noscript>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
