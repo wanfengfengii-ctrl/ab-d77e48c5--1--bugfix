@@ -2,7 +2,7 @@
  * 前端：帧/斑点录入、参数控制、调用谱系算法、可视化母女连线与漏检段。
  * 任一录入改动都会立即作废已显示的旧谱系，必须重新点击「复原谱系」。
  */
-import { solveLineage, validateInput, MIN_FRAMES, MAX_FRAMES,
+import { solveLineage, validateInput, toExactInt, MIN_FRAMES, MAX_FRAMES,
   MIN_SPOTS_PER_FRAME, MAX_SPOTS_PER_FRAME } from '../src/lineage.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -64,11 +64,128 @@ function defaultDraft() {
 
 let draft = loadDraft() || defaultDraft();
 
+/**
+ * 解析草稿 JSON：与 JSON.parse 等价，但整数字面量若超出双精度可精确表示范围，
+ * 以十进制字符串保留精确值（避免 9007199254740993 被舍入为 9007199254740992）。
+ * 非整数字面量维持 JSON.parse 的舍入结果（非整数坐标由校验报告「必须是整数」）。
+ */
+function parseDraftJson(text) {
+  let i = 0;
+  const fail = () => { throw new SyntaxError('草稿 JSON 无法解析'); };
+  const isDigit = (c) => c >= '0' && c <= '9';
+  const skipWs = () => {
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t' ||
+           text[i] === '\n' || text[i] === '\r')) i++;
+  };
+  const parseNumber = () => {
+    const start = i;
+    if (text[i] === '-') i++;
+    if (text[i] === '0') i++;
+    else if (isDigit(text[i])) { while (isDigit(text[i])) i++; }
+    else fail();
+    if (text[i] === '.') {
+      i++;
+      if (!isDigit(text[i])) fail();
+      while (isDigit(text[i])) i++;
+    }
+    if (text[i] === 'e' || text[i] === 'E') {
+      i++;
+      if (text[i] === '+' || text[i] === '-') i++;
+      if (!isDigit(text[i])) fail();
+      while (isDigit(text[i])) i++;
+    }
+    const lit = text.slice(start, i);
+    const exact = toExactInt(lit);
+    if (exact === null) return Number(lit); // 非整数：维持 JSON.parse 的舍入结果
+    const n = Number(lit);
+    // 恰可精确表示 → 数值；超出精确范围 → 保留十进制字符串
+    return Number.isInteger(n) && BigInt(n) === exact ? n : exact.toString();
+  };
+  const parseString = () => {
+    let out = '';
+    i++; // 跳过开引号
+    for (;;) {
+      if (i >= text.length) fail();
+      const c = text[i++];
+      if (c === '"') return out;
+      if (c === '\\') {
+        const esc = text[i++];
+        switch (esc) {
+          case '"': out += '"'; break;
+          case '\\': out += '\\'; break;
+          case '/': out += '/'; break;
+          case 'b': out += '\b'; break;
+          case 'f': out += '\f'; break;
+          case 'n': out += '\n'; break;
+          case 'r': out += '\r'; break;
+          case 't': out += '\t'; break;
+          case 'u': {
+            const hex = text.slice(i, i + 4);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail();
+            out += String.fromCharCode(parseInt(hex, 16));
+            i += 4;
+            break;
+          }
+          default: fail();
+        }
+      } else {
+        out += c;
+      }
+    }
+  };
+  const parseValue = () => {
+    skipWs();
+    const c = text[i];
+    if (c === '{') {
+      i++;
+      const obj = {};
+      skipWs();
+      if (text[i] === '}') { i++; return obj; }
+      for (;;) {
+        skipWs();
+        if (text[i] !== '"') fail();
+        const key = parseString();
+        skipWs();
+        if (text[i] !== ':') fail();
+        i++;
+        obj[key] = parseValue();
+        skipWs();
+        if (text[i] === ',') { i++; continue; }
+        if (text[i] === '}') { i++; return obj; }
+        fail();
+      }
+    }
+    if (c === '[') {
+      i++;
+      const arr = [];
+      skipWs();
+      if (text[i] === ']') { i++; return arr; }
+      for (;;) {
+        arr.push(parseValue());
+        skipWs();
+        if (text[i] === ',') { i++; continue; }
+        if (text[i] === ']') { i++; return arr; }
+        fail();
+      }
+    }
+    if (c === '"') return parseString();
+    if (c === 't') { if (text.startsWith('true', i)) { i += 4; return true; } fail(); }
+    if (c === 'f') { if (text.startsWith('false', i)) { i += 5; return false; } fail(); }
+    if (c === 'n') { if (text.startsWith('null', i)) { i += 4; return null; } fail(); }
+    if (c === '-' || isDigit(c)) return parseNumber();
+    fail();
+  };
+  const value = parseValue();
+  skipWs();
+  if (i < text.length) fail();
+  return value;
+}
+
 function loadDraft() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const d = JSON.parse(raw);
+    const d = parseDraftJson(raw);
     if (!Array.isArray(d.frames) || d.frames.length < MIN_FRAMES) return null;
     return d;
   } catch { return null; }
@@ -206,20 +323,30 @@ function markDirty() {
 
 // ---------------- 输入解析与求解 ----------------
 
+// 坐标值：恰可精确表示的整数化为 number；超出双精度精确范围的整数保留精确十进制字符串；
+// 其余（小数、空、非数值）原样返回，由校验报告「必须是整数」
+function coordValue(v) {
+  if (typeof v !== 'string') return v;
+  const exact = toExactInt(v);
+  if (exact === null) return v;
+  const n = Number(v);
+  return Number.isInteger(n) && BigInt(n) === exact ? n : exact.toString();
+}
+
 function parseDraft() {
   const problems = [];
   const frames = draft.frames.map((spots, f) => spots.map((s, i) => {
     const id = String(s.id ?? '').trim();
     if (!id) problems.push(`第 ${f + 1} 帧第 ${i + 1} 个斑点缺少编号`);
     const raw = { x: s.x, y: s.y, b: s.brightness };
-    const x = Number(s.x);
-    const y = Number(s.y);
+    const x = coordValue(s.x);
+    const y = coordValue(s.y);
     const b = Number(s.brightness);
     const label = id || `#${i + 1}`;
-    if (raw.x === '' || raw.x === null || !Number.isInteger(x)) {
+    if (raw.x === '' || raw.x === null || toExactInt(x) === null) {
       problems.push(`第 ${f + 1} 帧斑点 ${label} 的 x 必须是整数`);
     }
-    if (raw.y === '' || raw.y === null || !Number.isInteger(y)) {
+    if (raw.y === '' || raw.y === null || toExactInt(y) === null) {
       problems.push(`第 ${f + 1} 帧斑点 ${label} 的 y 必须是整数`);
     }
     if (raw.b === '' || raw.b === null || !Number.isInteger(b) || b < 0) {
@@ -324,7 +451,8 @@ function drawSvg(lineage, frames) {
     return e;
   };
 
-  const allY = frames.flat().map((s) => s.y);
+  // 布局仅作可视化：坐标可能超出双精度精确范围，此处统一转 Number（显示位置与数据坐标解耦）
+  const allY = frames.flat().map((s) => Number(s.y));
   const yMin = Math.min(...allY);
   const yMax = Math.max(...allY);
   const xAt = (f) => padL + (f / (n - 1)) * (VW - padL - padR);
@@ -334,8 +462,8 @@ function drawSvg(lineage, frames) {
 
   // 每帧内部对 y 坐标相同/过近的斑点做错位排布（仍贴近其真实 y）
   const posByFrame = frames.map((spots) => {
-    const sorted = spots.map((s, idx) => ({ s, idx, y: yAt(s.y) }))
-      .sort((a, b) => a.y - b.y || a.s.x - b.s.x || a.idx - b.idx);
+    const sorted = spots.map((s, idx) => ({ s, idx, y: yAt(Number(s.y)) }))
+      .sort((a, b) => a.y - b.y || Number(a.s.x) - Number(b.s.x) || a.idx - b.idx);
     const gap = 17;
     for (let i = 1; i < sorted.length; i++) {
       if (sorted[i].y - sorted[i - 1].y < gap) sorted[i].y = sorted[i - 1].y + gap;
@@ -507,6 +635,16 @@ for (const [key, el] of [['maxMove', els.maxMove], ['maxSkip', els.maxSkip], ['s
   el.addEventListener('input', () => { draft.params[key] = el.value; markDirty(); });
 }
 
+// 录入值 → 草稿值：整数恰可精确表示则存 number；超出精确范围的整数保留精确十进制字符串；
+// 其余（小数、空、非法）维持原行为，由校验提示
+function draftNumber(s) {
+  if (s === '') return '';
+  const n = Number(s);
+  if (!Number.isInteger(n)) return n;
+  const exact = toExactInt(String(s).trim());
+  return exact !== null && BigInt(n) !== exact ? exact.toString() : n;
+}
+
 // 事件委托：斑点字段编辑（不重渲染，避免输入焦点丢失）
 els.editor.addEventListener('input', (ev) => {
   const input = ev.target.closest('input[data-field]');
@@ -516,7 +654,10 @@ els.editor.addEventListener('input', (ev) => {
   const f = Number(block.dataset.frame);
   const i = Number(rowEl.dataset.idx);
   const field = input.dataset.field;
-  const v = field === 'id' ? input.value : (input.value === '' ? '' : Number(input.value));
+  // 坐标保留精确整数值；亮度维持数值（非负整数，当前契约范围内）
+  const v = field === 'id' ? input.value
+    : field === 'brightness' ? (input.value === '' ? '' : Number(input.value))
+    : draftNumber(input.value);
   draft.frames[f][i][field] = v;
   if (field === 'id' && f === 0) renderStartSelect();
   markDirty();

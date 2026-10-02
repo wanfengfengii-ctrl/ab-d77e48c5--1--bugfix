@@ -24,8 +24,72 @@ export const MIN_SPOTS_PER_FRAME = 2;
 export const MAX_SPOTS_PER_FRAME = 8;
 
 const isInt = (v) => Number.isInteger(v);
-const d2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
 const bit = (j) => 1 << j;
+
+/**
+ * 将录入值解析为精确整数（BigInt）。
+ * 接受：整数 number、十进制整数字符串（可含小数点与指数）、bigint。
+ * 超出双精度可精确表示范围的整数原样保留（谱系计算全程使用精确整数运算），
+ * 非整数或无法解析 → null（由校验报告「必须是整数」）。
+ */
+export function toExactInt(v) {
+  if (typeof v === 'bigint') return v;
+  if (typeof v === 'number') return Number.isInteger(v) ? BigInt(v) : null;
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  const m = /^([+-]?)(\d+)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(t);
+  if (!m) return null;
+  const [, sign, ip, fp = '', es] = m;
+  const exp = (es ? BigInt(es) : 0n) - BigInt(fp.length);
+  if (exp > 100000n || exp < -100000n) return null; // 天文指数：拒绝（数值已超出双精度可表示范围）
+  const digits = BigInt(sign + (ip + fp));
+  if (exp >= 0n) return digits * 10n ** exp;
+  const div = 10n ** -exp;
+  return digits % div === 0n ? digits / div : null;
+}
+
+/** 两个斑点的精确平方距离（BigInt） */
+const d2exact = (a, b) => {
+  const dx = a.ex - b.ex;
+  const dy = a.ey - b.ey;
+  return dx * dx + dy * dy;
+};
+
+/**
+ * 由双精度浮点数得到「尾数 × 2^指数」的精确分解（x 须为非负有限数）。
+ * 用于把 maxMove 的平方精确展开为整数运算，保证临界边界判定精确。
+ */
+function decomposeDouble(x) {
+  const buf = new DataView(new ArrayBuffer(8));
+  buf.setFloat64(0, x);
+  const hi = BigInt(buf.getUint32(0));
+  const lo = BigInt(buf.getUint32(4));
+  const expBits = Number((hi >> 20n) & 0x7ffn);
+  let m = ((hi & 0xfffffn) << 32n) | lo;
+  let e;
+  if (expBits === 0) e = -1074; // 次正规数
+  else { m = (1n << 52n) | m; e = expBits - 1075; }
+  return { m, e };
+}
+
+/**
+ * 距离上限谓词：返回 (d2: bigint) => boolean，判断 sqrt(d2) <= factor × maxMove
+ * 的精确结果（与 double 运算结果一致，且不受坐标精度损失影响）。
+ * 取 maxMove = m × 2^e，则 d2 ≤ factor²·m²·2^(2e) ⟺ d2·2^(-2e) ≤ factor²·m²（2e<0 时）。
+ */
+function exactMoveLimit(maxMove, factor = 1n) {
+  if (!Number.isFinite(maxMove)) return () => true; // Infinity：不限制（契约允许 maxMove ≥ 0）
+  if (maxMove === 0) return (d2) => d2 === 0n;
+  const { m, e } = decomposeDouble(maxMove);
+  const limit = m * m * factor * factor;
+  const shift = 2 * e;
+  if (shift >= 0) {
+    const lim = limit << BigInt(shift);
+    return (d2) => d2 <= lim;
+  }
+  const sh = BigInt(-shift);
+  return (d2) => (d2 << sh) <= limit;
+}
 
 function popcount(m) {
   let c = 0;
@@ -85,7 +149,9 @@ export function validateInput(frames, opts) {
       } else {
         ids.add(s.id);
       }
-      if (!s || !isInt(s.x) || !isInt(s.y)) errors.push(`第 ${f + 1} 帧斑点 ${label} 的坐标必须是整数`);
+      if (!s || toExactInt(s.x) === null || toExactInt(s.y) === null) {
+        errors.push(`第 ${f + 1} 帧斑点 ${label} 的坐标必须是整数`);
+      }
       if (!s || !isInt(s.brightness) || s.brightness < 0) {
         errors.push(`第 ${f + 1} 帧斑点 ${label} 的亮度必须是非负整数`);
       }
@@ -113,15 +179,16 @@ function mkLink(parent, child, kind) {
     segments.push({
       from: { frame: parent.f, x: parent.x, y: parent.y },
       to: { frame: child.f, x: child.x, y: child.y },
-      distance: Math.sqrt(d2(parent, child)),
+      // 显示用距离：精确平方距离经 Number 化（普通整数坐标下与旧实现一致）
+      distance: Math.sqrt(Number(d2exact(parent, child))),
       virtual: false,
     });
   } else {
     // 跨一帧：中间帧按线性插值给出漏检虚点，逐段位移为总距离的一半
-    const half = Math.sqrt(d2(parent, child)) / 2;
+    const half = Math.sqrt(Number(d2exact(parent, child))) / 2;
     const midFrame = (parent.f + child.f) / 2;
-    const midX = (parent.x + child.x) / 2;
-    const midY = (parent.y + child.y) / 2;
+    const midX = Number(parent.ex + child.ex) / 2;
+    const midY = Number(parent.ey + child.ey) / 2;
     segments.push(
       { from: { frame: parent.f, x: parent.x, y: parent.y },
         to: { frame: midFrame, x: midX, y: midY }, distance: half, virtual: true },
@@ -149,10 +216,14 @@ export function solveLineage(rawFrames, opts) {
   if (errors.length) return { ok: false, errors };
 
   const { startId, maxMove, maxSkip, survivors } = opts;
-  const F = rawFrames.map((spots, f) => spots.map((s, idx) => ({ ...s, f, idx })));
+  // ex/ey：坐标的精确整数值（整数坐标允许超出双精度可精确表示范围，距离计算全程用 BigInt）
+  const F = rawFrames.map((spots, f) => spots.map((s, idx) => ({
+    ...s, f, idx, ex: toExactInt(s.x), ey: toExactInt(s.y),
+  })));
   const n = F.length;
-  const mm2 = maxMove * maxMove;
-  const skip2 = 4 * mm2;
+  // 直连：sqrt(d2) ≤ maxMove；跨帧漏检：总距离 ≤ 2×maxMove（两段各 ≤ maxMove）
+  const withinDirect = exactMoveLimit(maxMove);
+  const withinSkip = exactMoveLimit(maxMove, 2n);
 
   const expandCache = Array.from({ length: n }, () => new Map());
 
@@ -189,9 +260,9 @@ export function solveLineage(rawFrames, opts) {
     const reserved = node.pm;
     const growth = 2 ** (n - i - 2); // 本次帧间之后每细胞还能翻倍的倍数
 
-    const stayCand = vis.map((p) => next.filter((c) => d2(p, c) <= mm2).map((c) => c.idx));
+    const stayCand = vis.map((p) => next.filter((c) => withinDirect(d2exact(p, c))).map((c) => c.idx));
     const skipCand = after
-      ? vis.map((p) => after.filter((g) => d2(p, g) <= skip2).map((g) => g.idx))
+      ? vis.map((p) => after.filter((g) => withinSkip(d2exact(p, g))).map((g) => g.idx))
       : null;
 
     const outcomes = [];
